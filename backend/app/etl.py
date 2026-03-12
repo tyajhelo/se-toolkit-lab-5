@@ -10,7 +10,8 @@ Both require HTTP Basic Auth (email + password from settings).
 from datetime import datetime
 
 import httpx
-from sqlmodel import func, select
+from sqlalchemy import func
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.models.interaction import InteractionLog
@@ -20,6 +21,7 @@ from app.settings import settings
 
 
 async def fetch_items() -> list[dict]:
+    """Fetch the lab/task catalog from the autochecker API."""
     url = f"{settings.autochecker_api_url}/api/items"
 
     async with httpx.AsyncClient(
@@ -27,8 +29,9 @@ async def fetch_items() -> list[dict]:
         timeout=30.0,
     ) as client:
         response = await client.get(url)
-        response.raise_for_status()
-        data = response.json()
+
+    response.raise_for_status()
+    data = response.json()
 
     if not isinstance(data, list):
         raise ValueError("Unexpected /api/items response format")
@@ -37,6 +40,7 @@ async def fetch_items() -> list[dict]:
 
 
 async def fetch_logs(since: datetime | None = None) -> list[dict]:
+    """Fetch check results from the autochecker API."""
     url = f"{settings.autochecker_api_url}/api/logs"
     all_logs: list[dict] = []
     current_since = since
@@ -74,6 +78,7 @@ async def fetch_logs(since: datetime | None = None) -> list[dict]:
 
 
 async def load_items(items: list[dict], session: AsyncSession) -> int:
+    """Load items (labs and tasks) into the database."""
     created_count = 0
     lab_map: dict[str, ItemRecord] = {}
 
@@ -138,6 +143,7 @@ async def load_items(items: list[dict], session: AsyncSession) -> int:
 async def load_logs(
     logs: list[dict], items_catalog: list[dict], session: AsyncSession
 ) -> int:
+    """Load interaction logs into the database."""
     created_count = 0
 
     title_lookup: dict[tuple[str, str | None], str] = {}
@@ -147,19 +153,22 @@ async def load_logs(
     for log in logs:
         learner = (
             await session.exec(
-                select(Learner).where(Learner.external_id == log["student_id"])
+                select(Learner).where(Learner.external_id == str(log["student_id"]))
             )
         ).first()
 
         if learner is None:
             learner = Learner(
-                external_id=log["student_id"],
+                external_id=str(log["student_id"]),
                 student_group=log.get("group", ""),
             )
             session.add(learner)
             await session.flush()
 
         item_title = title_lookup.get((log["lab"], log.get("task")))
+        if item_title is None and log.get("task") is None:
+            item_title = title_lookup.get((log["lab"], None))
+
         if item_title is None:
             continue
 
@@ -174,7 +183,9 @@ async def load_logs(
 
         existing_log = (
             await session.exec(
-                select(InteractionLog).where(InteractionLog.external_id == log["id"])
+                select(InteractionLog).where(
+                    InteractionLog.external_id == int(log["id"])
+                )
             )
         ).first()
 
@@ -182,7 +193,7 @@ async def load_logs(
             continue
 
         interaction = InteractionLog(
-            external_id=log["id"],
+            external_id=int(log["id"]),
             learner_id=learner.id,
             item_id=item.id,
             kind="attempt",
@@ -199,6 +210,7 @@ async def load_logs(
 
 
 async def sync(session: AsyncSession) -> dict:
+    """Run the full ETL pipeline."""
     items = await fetch_items()
     await load_items(items, session)
 
@@ -225,5 +237,3 @@ def _parse_api_datetime(value: str) -> datetime:
 
 def _to_api_datetime(value: datetime) -> str:
     return value.isoformat() + "Z"
-
-
